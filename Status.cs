@@ -244,6 +244,16 @@ public class Status : NetworkBehaviour
     [SerializeField]
     private float damageFlashDuration = 0.5f;
 
+    [Header("Wolf Self Visual")]
+    [SerializeField]
+    private SpriteRenderer bodySpriteRenderer;
+
+    [SerializeField]
+    private Sprite normalBodySprite;
+
+    [SerializeField]
+    private Sprite wolfBodySprite;
+
     private readonly Queue<SpellDebuffId> debuffOrder = new Queue<SpellDebuffId>();
     private readonly Dictionary<Status, float> normalCollisionDamageTimes =
         new Dictionary<Status, float>();
@@ -253,6 +263,8 @@ public class Status : NetworkBehaviour
     private SpriteRenderer[] cachedDamageFlashRenderers;
     private Color[] cachedDamageFlashColors;
     private Vector3 lastStatusTickPosition;
+
+    public bool IsWolfSelfActive => Runner != null && IsTimerActive(WolfTimer);
 
     public bool CanMove =>
         !IsTimerActive(FreezingTimer) && !IsTimerActive(IronbodyTimer) && !IsTimerActive(StunTimer);
@@ -337,6 +349,8 @@ public class Status : NetworkBehaviour
         }
 
         lastStatusTickPosition = transform.position;
+        CacheNormalBodySprite();
+        UpdateWolfSelfVisual();
 
         if (playerCamera != null)
         {
@@ -414,6 +428,8 @@ public class Status : NetworkBehaviour
 
     public override void Render()
     {
+        UpdateWolfSelfVisual();
+
         foreach (var change in _changes.DetectChanges(this))
         {
             switch (change)
@@ -444,6 +460,33 @@ public class Status : NetworkBehaviour
                     break;
             }
         }
+    }
+
+    private void CacheNormalBodySprite()
+    {
+        if (normalBodySprite == null && bodySpriteRenderer != null)
+        {
+            normalBodySprite = bodySpriteRenderer.sprite;
+        }
+    }
+
+    private void UpdateWolfSelfVisual()
+    {
+        if (bodySpriteRenderer == null)
+        {
+            return;
+        }
+
+        CacheNormalBodySprite();
+
+        bool wolfActive = IsWolfSelfActive;
+        Sprite targetSprite = wolfActive ? wolfBodySprite : normalBodySprite;
+        if (targetSprite == null || bodySpriteRenderer.sprite == targetSprite)
+        {
+            return;
+        }
+
+        bodySpriteRenderer.sprite = targetSprite;
     }
 
     public int GetStatLevel(PlayerStatId stat)

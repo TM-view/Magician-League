@@ -6,6 +6,9 @@ public class EquipmentVisual : MonoBehaviour
     private PlayerInventory inventory;
 
     [SerializeField]
+    private Status status;
+
+    [SerializeField]
     private SpriteRenderer weaponRenderer;
 
     [SerializeField]
@@ -14,11 +17,18 @@ public class EquipmentVisual : MonoBehaviour
     [SerializeField]
     private SpriteRenderer hatRenderer;
 
+    private bool wasWolfSelfActive;
+
     private void Awake()
     {
         if (inventory == null)
         {
             inventory = GetComponentInParent<PlayerInventory>();
+        }
+
+        if (status == null)
+        {
+            status = GetComponentInParent<Status>();
         }
     }
 
@@ -27,6 +37,17 @@ public class EquipmentVisual : MonoBehaviour
         if (inventory != null)
         {
             inventory.EquipmentChanged += Refresh;
+        }
+
+        Refresh();
+    }
+
+    private void Update()
+    {
+        bool wolfSelfActive = IsEquipmentHiddenByWolf();
+        if (wolfSelfActive == wasWolfSelfActive)
+        {
+            return;
         }
 
         Refresh();
@@ -42,6 +63,13 @@ public class EquipmentVisual : MonoBehaviour
 
     public void Refresh()
     {
+        wasWolfSelfActive = IsEquipmentHiddenByWolf();
+        SetEquipmentVisible(!wasWolfSelfActive);
+        if (wasWolfSelfActive)
+        {
+            return;
+        }
+
         if (!IsInventoryReady())
         {
             SetSprite(weaponRenderer, null);
@@ -66,11 +94,31 @@ public class EquipmentVisual : MonoBehaviour
         return inventory != null && inventory.Object != null && inventory.Object.IsValid;
     }
 
+    private bool IsEquipmentHiddenByWolf()
+    {
+        return status != null && status.IsWolfSelfActive;
+    }
+
     private void SetSprite(SpriteRenderer renderer, Sprite sprite)
     {
         if (renderer != null)
         {
             renderer.sprite = sprite;
+        }
+    }
+
+    private void SetEquipmentVisible(bool visible)
+    {
+        SetRendererVisible(weaponRenderer, visible);
+        SetRendererVisible(armorRenderer, visible);
+        SetRendererVisible(hatRenderer, visible);
+    }
+
+    private void SetRendererVisible(SpriteRenderer renderer, bool visible)
+    {
+        if (renderer != null)
+        {
+            renderer.enabled = visible;
         }
     }
 }
