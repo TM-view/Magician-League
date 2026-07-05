@@ -65,6 +65,8 @@ public class Status : NetworkBehaviour
     private const float BarrierDuration = 30f;
     private const float IronbodyDuration = 4f;
     private const float WolfDuration = 30f;
+    private const float KillCreditDuration = 5f;
+    private const int MaxDisplayNameLength = 7;
     private const float WettingFallSpeedThreshold = 7f;
     private const float WettingFallChance = 0.25f;
 
@@ -97,6 +99,9 @@ public class Status : NetworkBehaviour
 
     [Networked]
     public int Score { get; set; } = 0;
+
+    [Networked]
+    public NetworkString<_16> PlayerDisplayName { get; set; }
 
     [Networked]
     public float NextLevelExperience { get; set; } = 100f;
@@ -171,6 +176,9 @@ public class Status : NetworkBehaviour
     private TickTimer WetFreezeLockTimer { get; set; }
 
     [Networked]
+    private TickTimer LastDamageCreditTimer { get; set; }
+
+    [Networked]
     private int BarrierStacks { get; set; }
 
     [Networked]
@@ -192,6 +200,42 @@ public class Status : NetworkBehaviour
     private NetworkBool WolfMagicDisabled { get; set; }
 
     [Networked]
+    private NetworkBool HasLastDamageDealer { get; set; }
+
+    [Networked]
+    private NetworkBool BurningHasOwner { get; set; }
+
+    [Networked]
+    private NetworkBool PoisoningHasOwner { get; set; }
+
+    [Networked]
+    private NetworkBool WettingHasOwner { get; set; }
+
+    [Networked]
+    private NetworkBool ShockingHasOwner { get; set; }
+
+    [Networked]
+    private NetworkBool FreezingHasOwner { get; set; }
+
+    [Networked]
+    private PlayerRef LastDamageDealer { get; set; }
+
+    [Networked]
+    private PlayerRef BurningOwner { get; set; }
+
+    [Networked]
+    private PlayerRef PoisoningOwner { get; set; }
+
+    [Networked]
+    private PlayerRef WettingOwner { get; set; }
+
+    [Networked]
+    private PlayerRef ShockingOwner { get; set; }
+
+    [Networked]
+    private PlayerRef FreezingOwner { get; set; }
+
+    [Networked]
     private float WolfChargeDamageMultiplier { get; set; }
 
     [SerializeField]
@@ -208,12 +252,6 @@ public class Status : NetworkBehaviour
 
     [SerializeField]
     private TMP_Text manaText;
-
-    [SerializeField]
-    private TMP_Text playerName;
-
-    [SerializeField]
-    private TMP_Text scoreText;
 
     [SerializeField]
     private Image expBar;
@@ -263,6 +301,8 @@ public class Status : NetworkBehaviour
     private SpriteRenderer[] cachedDamageFlashRenderers;
     private Color[] cachedDamageFlashColors;
     private Vector3 lastStatusTickPosition;
+    private bool deathHandled;
+    private Coroutine shutdownCoroutine;
 
     public bool IsWolfSelfActive => Runner != null && IsTimerActive(WolfTimer);
 
@@ -345,6 +385,9 @@ public class Status : NetworkBehaviour
         if (Object.HasStateAuthority)
         {
             BaseSpeed = speed > 0f ? speed : DefaultBaseSpeed;
+            PlayerDisplayName = GetClampedDisplayName(
+                Object.HasInputAuthority ? PlayerData.Name : PlayerDisplayName.ToString()
+            );
             ApplyStats();
         }
 
@@ -355,16 +398,6 @@ public class Status : NetworkBehaviour
         if (playerCamera != null)
         {
             playerCamera.gameObject.SetActive(Object.HasInputAuthority);
-        }
-
-        if (playerName != null)
-        {
-            playerName.text = PlayerData.Name;
-        }
-
-        if (scoreText != null)
-        {
-            scoreText.text = Score.ToString();
         }
 
         if (expBar != null)
@@ -543,6 +576,39 @@ public class Status : NetworkBehaviour
         GainExperience(amount);
     }
 
+    public void AddScore(int amount)
+    {
+        amount = Mathf.Max(0, amount);
+        if (amount <= 0)
+        {
+            return;
+        }
+
+        if (!Object.HasStateAuthority)
+        {
+            RPC_AddScore(amount);
+            return;
+        }
+
+        Score += amount;
+    }
+
+    public void RecordDamageDealer(Status attacker)
+    {
+        if (attacker == null)
+        {
+            return;
+        }
+
+        NetworkObject attackerObject = attacker.Object;
+        if (attackerObject == null || !attackerObject.IsValid)
+        {
+            return;
+        }
+
+        RecordDamageDealer(attackerObject.InputAuthority, true);
+    }
+
     public int ApplyOutgoingDamageBonus(int amount)
     {
         return Mathf.CeilToInt(Mathf.Max(0, amount) * ValueMultiplier);
@@ -590,6 +656,8 @@ public class Status : NetworkBehaviour
         LayerMask hitMask
     )
     {
+        PlayerRef casterRef = GetPlayerRef(caster);
+        bool hasCaster = caster != null;
         if (!Object.HasStateAuthority)
         {
             RPC_ApplySpellImpact(
@@ -606,7 +674,9 @@ public class Status : NetworkBehaviour
                 impact.Explode,
                 impact.Leech,
                 impact.Slaughter,
-                impact.Powerup2
+                impact.Powerup2,
+                casterRef,
+                hasCaster
             );
             return 0;
         }
@@ -640,7 +710,7 @@ public class Status : NetworkBehaviour
 
             if (impact.Slaughter > 0 && !selfOrigin && RandomChance(impact.Slaughter))
             {
-                totalDamage += ApplyDamage(Health, false);
+                totalDamage += ApplyDamage(Health, false, caster);
             }
 
             if (incomingDamage > 0 && !selfOrigin)
@@ -648,7 +718,7 @@ public class Status : NetworkBehaviour
                 int damage = blockedByIronbody
                     ? Mathf.CeilToInt(incomingDamage * 0.1f)
                     : incomingDamage;
-                totalDamage += ApplyDamageWithWetting(damage);
+                totalDamage += ApplyDamageWithWetting(damage, caster);
             }
 
             if (!blocksNewNegativeStatuses)
@@ -777,13 +847,23 @@ public class Status : NetworkBehaviour
 
     public void InflictDebuff(SpellDebuffId debuff, float duration, bool selfOrigin)
     {
+        InflictDebuff(debuff, duration, selfOrigin, null);
+    }
+
+    public void InflictDebuff(
+        SpellDebuffId debuff,
+        float duration,
+        bool selfOrigin,
+        Status attacker
+    )
+    {
         if (!Object.HasStateAuthority)
         {
-            RPC_InflictDebuff((int)debuff, duration, selfOrigin);
+            RPC_InflictDebuff((int)debuff, duration, selfOrigin, GetPlayerRef(attacker), attacker != null);
             return;
         }
 
-        ApplyDebuff(debuff, duration, selfOrigin);
+        ApplyDebuff(debuff, duration, selfOrigin, attacker);
     }
 
     private void OnCollisionEnter2D(Collision2D collision)
@@ -824,6 +904,12 @@ public class Status : NetworkBehaviour
     }
 
     [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
+    public void RPC_TakeDamageFrom(int damage, PlayerRef attackerRef, NetworkBool hasAttacker)
+    {
+        ApplyDamage(damage, false, attackerRef, hasAttacker);
+    }
+
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
     public void RPC_Heal(int amount)
     {
         Heal(amount);
@@ -854,6 +940,12 @@ public class Status : NetworkBehaviour
     }
 
     [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
+    private void RPC_AddScore(int amount)
+    {
+        Score += Mathf.Max(0, amount);
+    }
+
+    [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
     private void RPC_Push(Vector2 force, NetworkBool resetVelocityBeforePush)
     {
         Push(force, resetVelocityBeforePush);
@@ -866,9 +958,20 @@ public class Status : NetworkBehaviour
     }
 
     [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
-    private void RPC_InflictDebuff(int debuff, float duration, NetworkBool selfOrigin)
+    private void RPC_InflictDebuff(
+        int debuff,
+        float duration,
+        NetworkBool selfOrigin,
+        PlayerRef attackerRef,
+        NetworkBool hasAttacker
+    )
     {
-        ApplyDebuff((SpellDebuffId)debuff, duration, selfOrigin);
+        ApplyDebuff(
+            (SpellDebuffId)debuff,
+            duration,
+            selfOrigin,
+            ResolveStatus(attackerRef, hasAttacker)
+        );
     }
 
     [Rpc(RpcSources.All, RpcTargets.StateAuthority)]
@@ -886,7 +989,9 @@ public class Status : NetworkBehaviour
         int explode,
         int leech,
         int slaughter,
-        int powerup2
+        int powerup2,
+        PlayerRef casterRef,
+        NetworkBool hasCaster
     )
     {
         SpellImpact impact = new SpellImpact
@@ -907,7 +1012,7 @@ public class Status : NetworkBehaviour
             Powerup2 = powerup2,
         };
 
-        ApplySpellImpact(ref impact, null, 1f, ~0);
+        ApplySpellImpact(ref impact, ResolveStatus(casterRef, hasCaster), 1f, ~0);
     }
 
     public void TakeDamage(int damage)
@@ -915,6 +1020,17 @@ public class Status : NetworkBehaviour
         if (!Object.HasStateAuthority)
             return;
         ApplyDamage(damage, false);
+    }
+
+    public void TakeDamageFrom(int damage, Status attacker)
+    {
+        if (!Object.HasStateAuthority)
+        {
+            RPC_TakeDamageFrom(damage, GetPlayerRef(attacker), attacker != null);
+            return;
+        }
+
+        ApplyDamage(damage, false, attacker);
     }
 
     public void Heal(int amount)
@@ -1091,24 +1207,29 @@ public class Status : NetworkBehaviour
 
         if (IsTimerActive(BurningTimer) && !BurningSelfOrigin)
         {
-            ApplyDamage(BurningDamage, true);
+            ApplyDamage(BurningDamage, true, BurningOwner, BurningHasOwner);
         }
 
         if (IsTimerActive(PoisoningTimer) && !PoisoningSelfOrigin)
         {
-            ApplyDamage(StrongPoisoning ? StrongPoisoningDamage : PoisoningDamage, true);
+            ApplyDamage(
+                StrongPoisoning ? StrongPoisoningDamage : PoisoningDamage,
+                true,
+                PoisoningOwner,
+                PoisoningHasOwner
+            );
         }
 
         if (IsTimerActive(FreezingTimer) && !FreezingSelfOrigin)
         {
-            ApplyDamage(FreezingDamage, true);
+            ApplyDamage(FreezingDamage, true, FreezingOwner, FreezingHasOwner);
         }
 
         Vector2 statusDelta = transform.position - lastStatusTickPosition;
         bool moved = statusDelta.sqrMagnitude > 0.0001f;
         if (IsTimerActive(ShockingTimer) && moved && !ShockingSelfOrigin)
         {
-            ApplyDamage(ShockingMoveDamage, true);
+            ApplyDamage(ShockingMoveDamage, true, ShockingOwner, ShockingHasOwner);
         }
 
         float movementSpeed = statusDelta.magnitude / StatusTickRate;
@@ -1143,6 +1264,105 @@ public class Status : NetworkBehaviour
     private bool IsTimerActive(TickTimer timer)
     {
         return timer.IsRunning && !timer.ExpiredOrNotRunning(Runner);
+    }
+
+    private string GetClampedDisplayName(string displayName)
+    {
+        if (string.IsNullOrWhiteSpace(displayName))
+        {
+            displayName = "Guest00";
+        }
+
+        displayName = displayName.Trim();
+        return displayName.Length <= MaxDisplayNameLength
+            ? displayName
+            : displayName.Substring(0, MaxDisplayNameLength);
+    }
+
+    private PlayerRef GetPlayerRef(Status source)
+    {
+        if (source == null || source.Object == null || !source.Object.IsValid)
+        {
+            return default;
+        }
+
+        return source.Object.InputAuthority;
+    }
+
+    private Status ResolveStatus(PlayerRef playerRef, bool hasPlayerRef)
+    {
+        if (!hasPlayerRef)
+        {
+            return null;
+        }
+
+        Status[] statuses = FindObjectsOfType<Status>();
+        for (int i = 0; i < statuses.Length; i++)
+        {
+            Status candidate = statuses[i];
+            if (
+                candidate != null
+                && candidate.Object != null
+                && candidate.Object.IsValid
+                && candidate.Object.InputAuthority == playerRef
+            )
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private void RecordDamageDealer(PlayerRef attackerRef, NetworkBool hasAttacker)
+    {
+        if (!Object.HasStateAuthority || !hasAttacker)
+        {
+            return;
+        }
+
+        if (Object != null && Object.IsValid && attackerRef == Object.InputAuthority)
+        {
+            return;
+        }
+
+        LastDamageDealer = attackerRef;
+        HasLastDamageDealer = true;
+        LastDamageCreditTimer = TickTimer.CreateFromSeconds(Runner, KillCreditDuration);
+    }
+
+    private void HandleDeathScoreTransfer()
+    {
+        if (deathHandled)
+        {
+            return;
+        }
+
+        deathHandled = true;
+        if (!HasLastDamageDealer || !IsTimerActive(LastDamageCreditTimer))
+        {
+            return;
+        }
+
+        if (Object != null && Object.IsValid && LastDamageDealer == Object.InputAuthority)
+        {
+            return;
+        }
+
+        Status attacker = ResolveStatus(LastDamageDealer, true);
+        if (attacker == null)
+        {
+            return;
+        }
+
+        int stolenScore = Mathf.Max(1, Mathf.FloorToInt(Score / 5f));
+        if (stolenScore <= 0)
+        {
+            return;
+        }
+
+        Score = Mathf.Max(0, Score - Mathf.Min(Score, stolenScore));
+        attacker.AddScore(stolenScore);
     }
 
     private void ExpireFinishedTimers()
@@ -1230,9 +1450,9 @@ public class Status : NetworkBehaviour
         return BarrierStacks > 0;
     }
 
-    private int ApplyDamageWithWetting(int amount)
+    private int ApplyDamageWithWetting(int amount, Status attacker)
     {
-        return ApplyDamage(amount, false);
+        return ApplyDamage(amount, false, attacker);
     }
 
     private void TrySpreadCollisionStatuses(Collider2D other)
@@ -1250,25 +1470,31 @@ public class Status : NetworkBehaviour
 
         if (IsTimerActive(BurningTimer))
         {
-            target.InflictDebuff(SpellDebuffId.Burning, BurningSpreadDuration, false);
+            target.InflictDebuff(SpellDebuffId.Burning, BurningSpreadDuration, false, this);
         }
 
         if (IsTimerActive(ShockingTimer))
         {
-            target.InflictDebuff(SpellDebuffId.Shocking, ShockingDuration, false);
+            target.InflictDebuff(SpellDebuffId.Shocking, ShockingDuration, false, this);
         }
 
         if (IsTimerActive(FreezingTimer))
         {
-            target.RPC_TakeDamage(
-                Mathf.CeilToInt(FreezingCollisionDamage * CollisionDamageMultiplier)
+            target.TakeDamageFrom(
+                Mathf.CeilToInt(FreezingCollisionDamage * CollisionDamageMultiplier),
+                this
             );
         }
     }
 
     private void TryApplyNormalCollisionDamage(Status target)
     {
-        if (target == null || target == this || player == null || target.GetComponent<Player>() == null)
+        if (
+            target == null
+            || target == this
+            || player == null
+            || target.GetComponent<Player>() == null
+        )
         {
             return;
         }
@@ -1280,7 +1506,7 @@ public class Status : NetworkBehaviour
 
         normalCollisionDamageTimes[target] = Time.time;
         int damage = Mathf.CeilToInt(NormalCollisionDamage * CollisionDamageMultiplier);
-        target.RPC_TakeDamage(damage);
+        target.TakeDamageFrom(damage, this);
     }
 
     private bool IsNormalCollisionDamageOnCooldown(Status target)
@@ -1291,12 +1517,28 @@ public class Status : NetworkBehaviour
 
     private int ApplyDamage(int damage, bool statusDamage)
     {
+        return ApplyDamage(damage, statusDamage, default, false);
+    }
+
+    private int ApplyDamage(int damage, bool statusDamage, Status attacker)
+    {
+        return ApplyDamage(damage, statusDamage, GetPlayerRef(attacker), attacker != null);
+    }
+
+    private int ApplyDamage(
+        int damage,
+        bool statusDamage,
+        PlayerRef attackerRef,
+        NetworkBool hasAttacker
+    )
+    {
         damage = Mathf.Max(0, damage);
         if (damage <= 0)
         {
             return 0;
         }
 
+        RecordDamageDealer(attackerRef, hasAttacker);
         Health = Mathf.Max(Health - damage, 0);
         PlayDamageFlash();
 
@@ -1305,9 +1547,13 @@ public class Status : NetworkBehaviour
             RegenDelayTimer = TickTimer.CreateFromSeconds(Runner, RegenDelay);
         }
 
-        if (Health <= 0 && Object.HasInputAuthority)
+        if (Health <= 0)
         {
-            Die();
+            HandleDeathScoreTransfer();
+            if (Object.HasInputAuthority)
+            {
+                Die();
+            }
         }
 
         return damage;
@@ -1409,22 +1655,31 @@ public class Status : NetworkBehaviour
     private void ApplyPowerupDebuffs(SpellImpact impact, bool selfOrigin, Status caster)
     {
         float chance = caster != null ? caster.DebuffChance : BaseDebuffChance;
-        RollDebuff(SpellDebuffId.Burning, impact.BurnRolls, selfOrigin, BurningDuration, chance);
+        RollDebuff(SpellDebuffId.Burning, impact.BurnRolls, selfOrigin, BurningDuration, chance, caster);
         RollDebuff(
             SpellDebuffId.Poisoning,
             impact.PoisonRolls,
             selfOrigin,
             PoisoningDuration,
-            chance
+            chance,
+            caster
         );
-        RollDebuff(SpellDebuffId.Wetting, impact.WetRolls, selfOrigin, WettingDuration, chance);
-        RollDebuff(SpellDebuffId.Shocking, impact.ShockRolls, selfOrigin, ShockingDuration, chance);
+        RollDebuff(SpellDebuffId.Wetting, impact.WetRolls, selfOrigin, WettingDuration, chance, caster);
+        RollDebuff(
+            SpellDebuffId.Shocking,
+            impact.ShockRolls,
+            selfOrigin,
+            ShockingDuration,
+            chance,
+            caster
+        );
         RollDebuff(
             SpellDebuffId.Freezing,
             impact.FreezeRolls,
             selfOrigin,
             FreezingDuration,
-            chance
+            chance,
+            caster
         );
     }
 
@@ -1433,19 +1688,25 @@ public class Status : NetworkBehaviour
         int rolls,
         bool selfOrigin,
         float duration,
-        float chance
+        float chance,
+        Status attacker
     )
     {
         for (int i = 0; i < rolls; i++)
         {
             if (Random.value <= chance)
             {
-                ApplyDebuff(debuff, duration, selfOrigin);
+                ApplyDebuff(debuff, duration, selfOrigin, attacker);
             }
         }
     }
 
-    private void ApplyDebuff(SpellDebuffId debuff, float duration, bool selfOrigin)
+    private void ApplyDebuff(
+        SpellDebuffId debuff,
+        float duration,
+        bool selfOrigin,
+        Status attacker
+    )
     {
         if (
             IsTimerActive(WetFreezeLockTimer)
@@ -1455,45 +1716,61 @@ public class Status : NetworkBehaviour
             return;
         }
 
-        if (ResolveCombination(debuff))
+        if (ResolveCombination(debuff, attacker))
         {
             return;
         }
+
+        PlayerRef attackerRef = GetPlayerRef(attacker);
+        bool hasAttacker = attacker != null;
 
         switch (debuff)
         {
             case SpellDebuffId.Burning:
                 BurningTimer = TickTimer.CreateFromSeconds(Runner, duration);
                 BurningSelfOrigin = selfOrigin;
+                BurningOwner = attackerRef;
+                BurningHasOwner = hasAttacker;
                 break;
             case SpellDebuffId.Poisoning:
                 PoisoningTimer = TickTimer.CreateFromSeconds(Runner, duration);
                 PoisoningSelfOrigin = selfOrigin;
+                PoisoningOwner = attackerRef;
+                PoisoningHasOwner = hasAttacker;
                 break;
             case SpellDebuffId.Wetting:
                 WettingTimer = TickTimer.CreateFromSeconds(Runner, duration);
+                WettingOwner = attackerRef;
+                WettingHasOwner = hasAttacker;
                 break;
             case SpellDebuffId.Shocking:
                 ShockingTimer = TickTimer.CreateFromSeconds(Runner, duration);
                 ShockingSelfOrigin = selfOrigin;
+                ShockingOwner = attackerRef;
+                ShockingHasOwner = hasAttacker;
                 break;
             case SpellDebuffId.Freezing:
                 FreezingTimer = TickTimer.CreateFromSeconds(Runner, duration);
                 FreezingSelfOrigin = selfOrigin;
+                FreezingOwner = attackerRef;
+                FreezingHasOwner = hasAttacker;
                 break;
         }
 
         debuffOrder.Enqueue(debuff);
     }
 
-    private bool ResolveCombination(SpellDebuffId incoming)
+    private bool ResolveCombination(SpellDebuffId incoming, Status attacker)
     {
+        PlayerRef attackerRef = GetPlayerRef(attacker);
+        bool hasAttacker = attacker != null;
+
         if (
             incoming == SpellDebuffId.Burning && IsTimerActive(WettingTimer)
             || incoming == SpellDebuffId.Wetting && IsTimerActive(BurningTimer)
         )
         {
-            ApplyDamage(BurningWettingDamage, true);
+            ApplyDamage(BurningWettingDamage, true, attackerRef, hasAttacker);
             ClearDebuff(SpellDebuffId.Burning);
             ClearDebuff(SpellDebuffId.Wetting);
             return true;
@@ -1504,10 +1781,10 @@ public class Status : NetworkBehaviour
             || incoming == SpellDebuffId.Freezing && IsTimerActive(BurningTimer)
         )
         {
-            ApplyDamage(FreezingBurningDamage, true);
+            ApplyDamage(FreezingBurningDamage, true, attackerRef, hasAttacker);
             ClearDebuff(SpellDebuffId.Burning);
             ClearDebuff(SpellDebuffId.Freezing);
-            ApplyDebuff(SpellDebuffId.Wetting, WettingDuration, false);
+            ApplyDebuff(SpellDebuffId.Wetting, WettingDuration, false, attacker);
             return true;
         }
 
@@ -1516,9 +1793,11 @@ public class Status : NetworkBehaviour
             || incoming == SpellDebuffId.Wetting && IsTimerActive(FreezingTimer)
         )
         {
-            ApplyDamage(WettingFreezingDamage, true);
+            ApplyDamage(WettingFreezingDamage, true, attackerRef, hasAttacker);
             ClearDebuff(SpellDebuffId.Wetting);
             FreezingTimer = TickTimer.CreateFromSeconds(Runner, FreezingDuration + 1f);
+            FreezingOwner = attackerRef;
+            FreezingHasOwner = hasAttacker;
             WetFreezeLockTimer = TickTimer.CreateFromSeconds(Runner, FreezingDuration + 1f);
             return true;
         }
@@ -1530,12 +1809,14 @@ public class Status : NetworkBehaviour
         {
             for (int i = 0; i < WettingShockingHitCount; i++)
             {
-                ApplyDamage(WettingShockingHitDamage, true);
+                ApplyDamage(WettingShockingHitDamage, true, attackerRef, hasAttacker);
             }
 
             ClearDebuff(SpellDebuffId.Wetting);
             ClearDebuff(SpellDebuffId.Shocking);
             FreezingTimer = TickTimer.CreateFromSeconds(Runner, 1.5f);
+            FreezingOwner = attackerRef;
+            FreezingHasOwner = hasAttacker;
             return true;
         }
 
@@ -1551,6 +1832,8 @@ public class Status : NetworkBehaviour
             {
                 StrongPoisoning = true;
                 PoisoningTimer = TickTimer.CreateFromSeconds(Runner, StrongPoisoningDuration);
+                PoisoningOwner = attackerRef;
+                PoisoningHasOwner = hasAttacker;
                 debuffOrder.Enqueue(SpellDebuffId.Poisoning);
             }
 
@@ -1575,22 +1858,27 @@ public class Status : NetworkBehaviour
             case SpellDebuffId.Burning:
                 BurningTimer = default;
                 BurningSelfOrigin = false;
+                BurningHasOwner = false;
                 break;
             case SpellDebuffId.Poisoning:
                 PoisoningTimer = default;
                 StrongPoisoning = false;
                 PoisoningSelfOrigin = false;
+                PoisoningHasOwner = false;
                 break;
             case SpellDebuffId.Wetting:
                 WettingTimer = default;
+                WettingHasOwner = false;
                 break;
             case SpellDebuffId.Shocking:
                 ShockingTimer = default;
                 ShockingSelfOrigin = false;
+                ShockingHasOwner = false;
                 break;
             case SpellDebuffId.Freezing:
                 FreezingTimer = default;
                 FreezingSelfOrigin = false;
+                FreezingHasOwner = false;
                 break;
         }
     }
@@ -1632,8 +1920,7 @@ public class Status : NetworkBehaviour
                 continue;
             }
 
-            DestructibleStructure structure =
-                hits[i].GetComponentInParent<DestructibleStructure>();
+            DestructibleStructure structure = hits[i].GetComponentInParent<DestructibleStructure>();
             if (structure == null || !structureTargets.Add(structure))
             {
                 continue;
@@ -1699,6 +1986,21 @@ public class Status : NetworkBehaviour
 
     private void Die()
     {
-        Runner.Shutdown();
+        if (shutdownCoroutine != null)
+        {
+            return;
+        }
+
+        shutdownCoroutine = StartCoroutine(ShutdownAfterScoreSync());
+    }
+
+    private IEnumerator ShutdownAfterScoreSync()
+    {
+        yield return new WaitForSeconds(0.15f);
+
+        if (Runner != null)
+        {
+            Runner.Shutdown();
+        }
     }
 }

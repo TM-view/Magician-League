@@ -489,7 +489,7 @@ public class WolfPet : NetworkBehaviour
             }
 
             hitCooldowns[statusTarget] = Time.time;
-            statusTarget.RPC_TakeDamage(Mathf.Max(0, attackDamage));
+            statusTarget.TakeDamageFrom(Mathf.Max(0, attackDamage), ownerStatus);
             return;
         }
 
