@@ -43,7 +43,7 @@ Create / Edit Spell         │
      │                      │
      └──────┬───────────────┘
             ▼
-    Continue Fighting
+     Continue Fighting
             │
             ▼
       End Match / Died
@@ -52,7 +52,7 @@ Create / Edit Spell         │
       Scoreboard update
             │
             ▼
-Return to Lobby
+      Return to Lobby
 
 ```
 ---
@@ -72,11 +72,11 @@ The spell system is built using reusable Spell Components rather than hardcoded 
 Example
 
 ```
-   Linear (Active)
+Linear (Active)
       +
-   Damage (Effect)
+Damage (Effect)
       +
-    Burn (Powerup)
+Burn (Powerup)
       ↓
    Fireball
 ```
@@ -135,9 +135,11 @@ Combination:
 - Poisoning + Burning = There's a 25/75 chance of whether or not both status effects will be removed. If not removed, the first poison will reappear and cannot be removed by this process again. The stronger poison will deal twice as much damage and last twice as long
 
 ## Rule
+- Spell have 10 slot for spell component (all type)
 - If a negative situation originates from within ourselves, it won't self-destructively, but other negative effects will persist, such as slowing down or taking more damage
 - Magic cannot inflict damage on oneself
 - If the status is applied repeatedly, it will reset the time
+- A = Active, E = Effect, P = Powerup 
 - An effect must have "Active" in front of it, for example, A E P E (the second E is considered to already contain A)
 - Powerup must be placed after an Effect character, for example, A E P P (the second P is considered legal)
 - If a player uses more than one Active component, it will have this effect: e.g., A E P P A E P P (the second E P P after the A will act separately from the first A E P P). A further example: the first A E P P deals area damage (Linear), while the second A E P P deals area damage (Around). It will deal damage around the Linear element it fires, but only at the end of the Linear range, not continuously
